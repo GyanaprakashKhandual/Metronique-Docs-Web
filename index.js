@@ -1,0 +1,231 @@
+const express = require('express');
+const cors = require('cors');
+const helmet = require('helmet');
+const compression = require('compression');
+const cookieParser = require('cookie-parser');
+const session = require('express-session');
+const passport = require('passport');
+const mongoSanitize = require('express-mongo-sanitize');
+const rateLimit = require('express-rate-limit');
+const morgan = require('morgan');
+const path = require('path');
+const http = require('http');
+
+const env = require('./configs/environment.config');
+const connectDB = require('./configs/db.config');
+require('./configs/passport.config');
+
+const userRoutes = require('./routes/user.route');
+
+env.validateEnvironment();
+
+const app = express();
+const server = http.createServer(app);
+
+app.use(helmet({
+    contentSecurityPolicy: env.isProduction(),
+    crossOriginEmbedderPolicy: env.isProduction()
+}));
+
+const allowedOrigins = [
+    'http://localhost:3000',
+    'https://doc.peach.vercel.app',
+    'https://www.doc.peach.com',
+    env.security.corsOrigin
+].filter(Boolean);
+
+app.use(cors({
+    origin: (origin, callback) => {
+        if (!origin || allowedOrigins.includes(origin)) {
+            callback(null, true);
+        } else {
+            callback(new Error('Not allowed by CORS'));
+        }
+    },
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS', 'HEAD'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin'],
+    exposedHeaders: ['Content-Length', 'X-Request-Id'],
+    maxAge: 86400
+}));
+
+app.use(compression());
+
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+
+app.use(cookieParser());
+
+app.use(mongoSanitize());
+
+if (env.isDevelopment()) {
+    app.use(morgan('dev'));
+} else {
+    app.use(morgan('combined'));
+}
+
+app.use(session({
+    secret: env.session.secret,
+    resave: false,
+    saveUninitialized: false,
+    cookie: {
+        secure: env.session.cookie.secure,
+        httpOnly: env.session.cookie.httpOnly,
+        sameSite: env.session.cookie.sameSite,
+        maxAge: 24 * 60 * 60 * 1000
+    }
+}));
+
+app.use(passport.initialize());
+app.use(passport.session());
+
+const limiter = rateLimit({
+    windowMs: env.security.rateLimit.windowMs,
+    max: env.security.rateLimit.maxRequests,
+    message: 'Too many requests from this IP, please try again later',
+    standardHeaders: true,
+    legacyHeaders: false
+});
+
+app.use('/api/', limiter);
+
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+
+app.get('/health', async (req, res) => {
+    const dbHealth = await require('./configs/db.config').checkDBHealth();
+    const dbStats = require('./configs/db.config').getConnectionStats();
+
+    res.status(200).json({
+        status: 'ok',
+        timestamp: new Date().toISOString(),
+        environment: env.node.env,
+        uptime: process.uptime(),
+        database: dbHealth,
+        stats: dbStats,
+        memory: {
+            used: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
+            total: Math.round(process.memoryUsage().heapTotal / 1024 / 1024)
+        }
+    });
+});
+
+
+const API_VERSION = env.api.version;
+
+app.get('/api', (req, res) => {
+    res.status(200).json({
+        message: 'Google Docs Clone API',
+        version: API_VERSION,
+        environment: env.node.env,
+        timestamp: new Date().toISOString()
+    });
+});
+
+app.use(`/api/${API_VERSION}/users`, userRoutes);
+
+app.use((req, res) => {
+    res.status(404).json({
+        success: false,
+        message: 'Route not found',
+        path: req.originalUrl
+    });
+});
+
+app.use((err, req, res, next) => {
+    console.error('Error:', err);
+
+    if (err.name === 'ValidationError') {
+        return res.status(400).json({
+            success: false,
+            message: 'Validation error',
+            errors: Object.values(err.errors).map(e => e.message)
+        });
+    }
+
+    if (err.name === 'UnauthorizedError') {
+        return res.status(401).json({
+            success: false,
+            message: 'Unauthorized access'
+        });
+    }
+
+    if (err.code === 11000) {
+        return res.status(409).json({
+            success: false,
+            message: 'Duplicate entry found',
+            field: Object.keys(err.keyPattern)[0]
+        });
+    }
+
+    res.status(err.status || 500).json({
+        success: false,
+        message: env.isProduction() ? 'Internal server error' : err.message,
+        ...(env.isDevelopment() && { stack: err.stack })
+    });
+});
+
+const startServer = async () => {
+    try {
+        await connectDB();
+
+        const PORT = env.node.port;
+        const HOST = env.node.host;
+
+        server.listen(PORT, () => {
+            console.log('');
+            console.log('='.repeat(50));
+            console.log(`Server running in ${env.node.env.toUpperCase()} mode`);
+            console.log(`Server: http://${HOST}:${PORT}`);
+            console.log(`Health: http://${HOST}:${PORT}/health`);
+            console.log(`API: http://${HOST}:${PORT}/api`);
+            console.log('='.repeat(50));
+            console.log('');
+        });
+    } catch (error) {
+        console.error('Failed to start server:', error.message);
+        process.exit(1);
+    }
+};
+
+const gracefulShutdown = async (signal) => {
+    console.log(`\n${signal} received. Starting graceful shutdown...`);
+
+    server.close(async () => {
+        console.log('HTTP server closed');
+
+        try {
+            await require('./configs/db.config').disconnectDB();
+            console.log('Database connections closed');
+            process.exit(0);
+        } catch (error) {
+            console.error('Error during shutdown:', error);
+            process.exit(1);
+        }
+    });
+
+    setTimeout(() => {
+        console.error('Forced shutdown after timeout');
+        process.exit(1);
+    }, 10000);
+};
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+    if (env.isProduction()) {
+        gracefulShutdown('UNHANDLED_REJECTION');
+    }
+});
+
+process.on('uncaughtException', (error) => {
+    console.error('Uncaught Exception:', error);
+    gracefulShutdown('UNCAUGHT_EXCEPTION');
+});
+
+if (require.main === module) {
+    startServer();
+}
+
+module.exports = app;
