@@ -11,7 +11,7 @@ const environment = {
     },
 
     database: {
-        dev: process.env.MONGODB_URI_DEV || 'mongodb://localhost:27017/google-docs-clone',
+        dev: process.env.MONGODB_URI_DEV,
         staging: process.env.MONGODB_URI_STAGING,
         prod: process.env.MONGODB_URI_PROD,
         debugMode: process.env.DEBUG_MONGO === 'true'
@@ -28,12 +28,12 @@ const environment = {
         google: {
             clientId: process.env.GOOGLE_CLIENT_ID,
             clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-            callbackUrl: process.env.GOOGLE_CALLBACK_URL || '/api/auth/google/callback'
+            callbackUrl: process.env.GOOGLE_CALLBACK_URL
         },
         github: {
             clientId: process.env.GITHUB_CLIENT_ID,
             clientSecret: process.env.GITHUB_CLIENT_SECRET,
-            callbackUrl: process.env.GITHUB_CALLBACK_URL || '/api/auth/github/callback'
+            callbackUrl: process.env.GITHUB_CALLBACK_URL
         }
     },
 
@@ -50,7 +50,7 @@ const environment = {
         password: process.env.SMTP_PASSWORD,
         from: {
             email: process.env.SMTP_FROM_EMAIL,
-            name: process.env.SMTP_FROM_NAME || 'Google Docs Clone'
+            name: process.env.SMTP_FROM_NAME
         }
     },
 

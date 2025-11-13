@@ -9,7 +9,7 @@ const connectDB = async () => {
         } else if (process.env.NODE_ENV === 'staging') {
             mongoURI = process.env.MONGODB_URI_STAGING;
         } else {
-            mongoURI = process.env.MONGODB_URI_DEV || 'mongodb://localhost:27017/google-docs-clone';
+            mongoURI = process.env.MONGODB_URI_DEV;
         }
 
         if (!mongoURI) {

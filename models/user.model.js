@@ -1,8 +1,6 @@
 const mongoose = require('mongoose');
 
-// COMPLETE UPDATED USER MODEL
 const userSchema = new mongoose.Schema({
-    // Basic Info
     name: {
         type: String,
         required: true,
@@ -13,12 +11,9 @@ const userSchema = new mongoose.Schema({
         required: true,
         unique: true,
         lowercase: true,
-        trim: true,
-        index: true
     },
     password: String,
-    
-    // NEW: Avatar & Profile
+
     avatar: {
         type: String,
         default: ''
@@ -37,8 +32,7 @@ const userSchema = new mongoose.Schema({
         default: 'en'
     },
     country: String,
-    
-    // NEW: Account Status
+
     role: {
         type: String,
         enum: ['admin', 'user', 'guest', 'moderator'],
@@ -50,16 +44,18 @@ const userSchema = new mongoose.Schema({
     },
     emailVerifiedAt: Date,
     emailVerificationToken: String,
-    
-    // NEW: Authentication & Security
+    emailVerificationExpires: Date,
+
+    magicLinkToken: String,
+    magicLinkExpires: Date,
+
     twoFactorEnabled: {
         type: Boolean,
         default: false
     },
     twoFactorSecret: String,
     twoFactorBackupCodes: [String],
-    
-    // NEW: Workspace Relationships (CRITICAL)
+
     workspaces: [{
         workspace: {
             type: mongoose.Schema.Types.ObjectId,
@@ -80,8 +76,7 @@ const userSchema = new mongoose.Schema({
         type: mongoose.Schema.Types.ObjectId,
         ref: 'Workspace'
     },
-    
-    // NEW: Recent Documents (for quick access)
+
     recentDocuments: [{
         document: {
             type: mongoose.Schema.Types.ObjectId,
@@ -92,14 +87,12 @@ const userSchema = new mongoose.Schema({
             default: Date.now
         }
     }],
-    
-    // NEW: Favorite Documents
+
     favoriteDocuments: [{
         type: mongoose.Schema.Types.ObjectId,
         ref: 'Document'
     }],
-    
-    // NEW: Sessions (for activity tracking)
+
     sessions: [{
         sessionId: String,
         token: String,
@@ -113,8 +106,7 @@ const userSchema = new mongoose.Schema({
         lastActivityAt: Date,
         expiresAt: Date
     }],
-    
-    // NEW: Preferences
+
     preferences: {
         theme: {
             type: String,
@@ -147,11 +139,10 @@ const userSchema = new mongoose.Schema({
         },
         autoSaveInterval: {
             type: Number,
-            default: 5000 // milliseconds
+            default: 5000
         }
     },
-    
-    // NEW: Social & Connections
+
     socialProfiles: {
         twitter: String,
         linkedin: String,
@@ -169,8 +160,7 @@ const userSchema = new mongoose.Schema({
         },
         connectedAt: Date
     }],
-    
-    // NEW: Notification Preferences
+
     notifications: {
         mentions: {
             type: Boolean,
@@ -189,8 +179,7 @@ const userSchema = new mongoose.Schema({
             default: true
         }
     },
-    
-    // NEW: Activity Tracking
+
     lastActive: {
         type: Date,
         default: Date.now
@@ -201,8 +190,7 @@ const userSchema = new mongoose.Schema({
     },
     lastLoginAt: Date,
     lastLoginIP: String,
-    
-    // NEW: Status Fields
+
     status: {
         type: String,
         enum: ['active', 'suspended', 'deactivated', 'deleted'],
@@ -211,8 +199,7 @@ const userSchema = new mongoose.Schema({
     suspendedAt: Date,
     suspensionReason: String,
     deletedAt: Date,
-    
-    // NEW: Subscription & Billing
+
     subscription: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'Subscription'
@@ -222,8 +209,7 @@ const userSchema = new mongoose.Schema({
         enum: ['free', 'starter', 'pro', 'business'],
         default: 'free'
     },
-    
-    // NEW: Search & Analytics
+
     totalDocumentsCreated: {
         type: Number,
         default: 0
@@ -236,8 +222,7 @@ const userSchema = new mongoose.Schema({
         type: Number,
         default: 0
     },
-    
-    // NEW: API & Integrations
+
     apiKeys: [{
         name: String,
         key: String,
@@ -252,8 +237,7 @@ const userSchema = new mongoose.Schema({
             default: true
         }
     }],
-    
-    // NEW: OAuth Connections
+
     oauthConnections: [{
         provider: String,
         providerId: String,
@@ -263,20 +247,18 @@ const userSchema = new mongoose.Schema({
             default: Date.now
         }
     }],
-    
-    // NEW: Password Reset
+
     passwordResetToken: String,
     passwordResetExpires: Date,
     passwordChangedAt: Date,
-    
-    // NEW: Profile Completion
+
     profileCompletion: {
         type: Number,
         default: 0,
         min: 0,
         max: 100
     },
-    
+
     metadata: {
         signupSource: String,
         referredBy: {
@@ -288,10 +270,9 @@ const userSchema = new mongoose.Schema({
     timestamps: true
 });
 
-// Indexes
-userSchema.index({ email: 1 });
-userSchema.index({ 'workspaces.workspace': 1 });
-userSchema.index({ status: 1 });
-userSchema.index({ createdAt: -1 });
+userSchema.methods.comparePassword = async function (password) {
+    const { comparePassword } = require('../utils/auth.util.js');
+    return await comparePassword(password, this.password);
+};
 
 module.exports = mongoose.model('User', userSchema);

@@ -6,6 +6,7 @@ const userController = require('../controllers/user.controller.js');
 const router = express.Router();
 
 // ==================== PUBLIC ROUTES ====================
+router.post('/auth/verify-email-address', userController.verifyEmail);
 
 /**
  * @route   POST /api/users/register

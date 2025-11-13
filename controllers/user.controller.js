@@ -1,23 +1,178 @@
 const User = require("../models/user.model.js");
 const Workspace = require("../models/workspace.model.js");
 const {
-    generateJWT,
-    generateRefreshToken,
-    hashPassword,
-} = require("../configs/passport.config.js");
-const {
     sendMagicLinkEmail,
     sendWelcomeEmail,
     sendVerificationEmail,
+    sendPasswordResetEmail
 } = require("../configs/mail.config.js");
 const crypto = require("crypto");
 const jwt = require("jsonwebtoken");
+const {
+    generateJWT,
+    generateRefreshToken,
+    hashPassword,
+} = require("../utils/auth.util.js");
+
+const verifyEmail = async (req, res) => {
+    try {
+        const { token, email } = req.body;
+
+        console.log(`[AUTH] Email verification initiated for: ${email}`);
+
+        if (!token || !email) {
+            console.log(`[AUTH] Email verification failed: Missing required fields`);
+            return res.status(400).json({
+                success: false,
+                message: "Token and email are required",
+            });
+        }
+
+        const user = await User.findOne({ email: email.toLowerCase() });
+
+        if (!user) {
+            console.log(`[AUTH] Email verification failed: User not found - ${email}`);
+            return res.status(400).json({
+                success: false,
+                message: "User not found",
+            });
+        }
+
+        if (!user.emailVerificationToken || !user.emailVerificationExpires) {
+            console.log(`[AUTH] Email verification failed: No verification data - ${email}`);
+            return res.status(400).json({
+                success: false,
+                message: "Invalid or expired verification link",
+            });
+        }
+
+        if (Date.now() > user.emailVerificationExpires) {
+            console.log(`[AUTH] Email verification failed: Token expired - ${email}`);
+            return res.status(400).json({
+                success: false,
+                message: "Verification link has expired",
+            });
+        }
+
+        const hashedToken = crypto.createHash("sha256").update(token).digest("hex");
+
+        if (hashedToken !== user.emailVerificationToken) {
+            console.log(`[AUTH] Email verification failed: Invalid token - ${email}`);
+            return res.status(400).json({
+                success: false,
+                message: "Invalid verification link",
+            });
+        }
+
+        user.emailVerificationToken = null;
+        user.emailVerificationExpires = null;
+        user.isEmailVerified = true;
+        user.emailVerifiedAt = new Date();
+        user.lastLoginAt = new Date();
+        user.isOnline = true;
+
+        if (!user.workspaces || user.workspaces.length === 0) {
+            console.log(`[AUTH] Creating workspace for user: ${email}`);
+            const workspace = new Workspace({
+                name: `${user.name}'s Workspace`,
+                slug: `workspace-${user._id.toString().substring(0, 8)}`,
+                description: "Your personal workspace",
+                owner: user._id,
+                type: "personal",
+                members: [
+                    {
+                        user: user._id,
+                        role: "owner",
+                        status: "active",
+                    },
+                ],
+                usage: {
+                    documents: { count: 0, unlimited: false },
+                    storage: { used: 0, unit: 'GB', unlimited: false },
+                    members: { count: 1, unlimited: false }
+                },
+                statistics: {
+                    totalDocuments: 0,
+                    totalFolders: 0,
+                    totalComments: 0,
+                    totalActivities: 0,
+                    activeMembers: 1,
+                    storageUsed: 0,
+                    lastActivityAt: new Date()
+                }
+            });
+
+            await workspace.save();
+
+            user.workspaces = [
+                {
+                    workspace: workspace._id,
+                    role: "owner",
+                    joinedAt: new Date(),
+                    isPrimary: true,
+                },
+            ];
+            user.primaryWorkspace = workspace._id;
+        }
+
+        await user.save();
+
+        sendWelcomeEmail(user.email, user.name)
+            .then(() => console.log(`[AUTH] Welcome email sent: ${user.email}`))
+            .catch(err => console.error(`[AUTH] Welcome email failed: ${user.email} - ${err.message}`));
+
+        const jwtToken = generateJWT(user._id);
+        const refreshToken = generateRefreshToken(user._id);
+
+        res.cookie("refreshToken", refreshToken, {
+            httpOnly: true,
+            secure: process.env.NODE_ENV === "production",
+            sameSite: "lax",
+            maxAge: 90 * 24 * 60 * 60 * 1000,
+        });
+
+        console.log(`[AUTH] Email verification successful: ${email}`);
+
+        return res.json({
+            success: true,
+            message: "Email verified successfully. You are now logged in.",
+            data: {
+                user: {
+                    id: user._id,
+                    name: user.name,
+                    email: user.email,
+                    avatar: user.avatar,
+                    role: user.role,
+                    isEmailVerified: user.isEmailVerified,
+                    primaryWorkspace: user.primaryWorkspace,
+                    workspaces: user.workspaces.map((w) => ({
+                        workspace: w.workspace,
+                        role: w.role,
+                        isPrimary: w.isPrimary,
+                    })),
+                },
+                token: jwtToken,
+                refreshToken,
+                expiresIn: "30d",
+            },
+        });
+    } catch (error) {
+        console.error(`[AUTH] Email verification error: ${error.message}`);
+        res.status(500).json({
+            success: false,
+            message: "Error verifying email",
+        });
+    }
+};
 
 const sendMagicLink = async (req, res) => {
     try {
         const { email } = req.body;
 
+        console.log(`[AUTH] Magic link requested for: ${email}`);
+
         if (!email) {
+            console.log(`[AUTH] Magic link failed: Email missing`);
             return res.status(400).json({
                 success: false,
                 message: "Email is required",
@@ -26,6 +181,7 @@ const sendMagicLink = async (req, res) => {
 
         const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
         if (!emailRegex.test(email)) {
+            console.log(`[AUTH] Magic link failed: Invalid email format - ${email}`);
             return res.status(400).json({
                 success: false,
                 message: "Invalid email format",
@@ -35,6 +191,7 @@ const sendMagicLink = async (req, res) => {
         let user = await User.findOne({ email: email.toLowerCase() });
 
         if (!user) {
+            console.log(`[AUTH] Creating new user for magic link: ${email}`);
             user = new User({
                 name: email.split("@")[0],
                 email: email.toLowerCase(),
@@ -51,30 +208,26 @@ const sendMagicLink = async (req, res) => {
                     autoSaveInterval: 5000,
                 },
             });
-
-            await user.save();
-            console.log(`New user created for magic link authentication: ${email}`);
         }
 
         const magicLinkToken = crypto.randomBytes(32).toString("hex");
-        const magicLinkExpires = Date.now() + 15 * 60 * 1000;
-
-        user.magicLinkToken = crypto
+        const hashedToken = crypto
             .createHash("sha256")
             .update(magicLinkToken)
             .digest("hex");
+
+        const magicLinkExpires = Date.now() + 15 * 60 * 1000;
+
+        user.magicLinkToken = hashedToken;
         user.magicLinkExpires = magicLinkExpires;
 
         await user.save();
 
-        const magicLink = `${process.env.FRONTEND_URL
-            }/auth/verify-email?token=${magicLinkToken}&email=${encodeURIComponent(
-                email
-            )}`;
+        const magicLink = `${process.env.FRONTEND_URL}/auth/verify-email?token=${magicLinkToken}&email=${encodeURIComponent(email)}`;
 
         try {
             await sendMagicLinkEmail(email, magicLink, user.name);
-            console.log(`Magic link sent successfully to: ${email}`);
+            console.log(`[AUTH] Magic link sent successfully: ${email}`);
 
             res.json({
                 success: true,
@@ -85,16 +238,14 @@ const sendMagicLink = async (req, res) => {
                 },
             });
         } catch (emailError) {
-            console.error(
-                `Failed to send magic link email to ${email}: ${emailError.message}`
-            );
+            console.error(`[AUTH] Magic link email failed: ${email} - ${emailError.message}`);
             res.status(500).json({
                 success: false,
                 message: "Failed to send magic link. Please try again.",
             });
         }
     } catch (error) {
-        console.error(`Magic link generation error: ${error.message}`);
+        console.error(`[AUTH] Magic link error: ${error.message}`);
         res.status(500).json({
             success: false,
             message: "Error sending magic link",
@@ -106,7 +257,10 @@ const verifyMagicLink = async (req, res) => {
     try {
         const { token, email } = req.body;
 
+        console.log(`[AUTH] Magic link verification initiated for: ${email}`);
+
         if (!token || !email) {
+            console.log(`[AUTH] Magic link verification failed: Missing required fields`);
             return res.status(400).json({
                 success: false,
                 message: "Token and email are required",
@@ -116,6 +270,7 @@ const verifyMagicLink = async (req, res) => {
         const user = await User.findOne({ email: email.toLowerCase() });
 
         if (!user) {
+            console.log(`[AUTH] Magic link verification failed: User not found - ${email}`);
             return res.status(400).json({
                 success: false,
                 message: "User not found",
@@ -123,6 +278,7 @@ const verifyMagicLink = async (req, res) => {
         }
 
         if (!user.magicLinkToken || !user.magicLinkExpires) {
+            console.log(`[AUTH] Magic link verification failed: No magic link data - ${email}`);
             return res.status(400).json({
                 success: false,
                 message: "Invalid or expired magic link",
@@ -130,7 +286,7 @@ const verifyMagicLink = async (req, res) => {
         }
 
         if (Date.now() > user.magicLinkExpires) {
-            console.log(`Expired magic link token attempt for: ${email}`);
+            console.log(`[AUTH] Magic link verification failed: Token expired - ${email}`);
             return res.status(400).json({
                 success: false,
                 message: "Magic link has expired",
@@ -140,7 +296,7 @@ const verifyMagicLink = async (req, res) => {
         const hashedToken = crypto.createHash("sha256").update(token).digest("hex");
 
         if (hashedToken !== user.magicLinkToken) {
-            console.log(`Invalid magic link token attempt for: ${email}`);
+            console.log(`[AUTH] Magic link verification failed: Invalid token - ${email}`);
             return res.status(400).json({
                 success: false,
                 message: "Invalid magic link",
@@ -155,6 +311,7 @@ const verifyMagicLink = async (req, res) => {
         user.isOnline = true;
 
         if (!user.workspaces || user.workspaces.length === 0) {
+            console.log(`[AUTH] Creating workspace for user: ${email}`);
             const workspace = new Workspace({
                 name: `${user.name}'s Workspace`,
                 slug: `workspace-${user._id.toString().substring(0, 8)}`,
@@ -181,19 +338,13 @@ const verifyMagicLink = async (req, res) => {
                 },
             ];
             user.primaryWorkspace = workspace._id;
-            console.log(`Personal workspace created for user: ${email}`);
         }
 
         await user.save();
 
-        try {
-            await sendWelcomeEmail(user.email, user.name);
-            console.log(`Welcome email sent to: ${email}`);
-        } catch (emailError) {
-            console.error(
-                `Failed to send welcome email to ${email}: ${emailError.message}`
-            );
-        }
+        sendWelcomeEmail(user.email, user.name)
+            .then(() => console.log(`[AUTH] Welcome email sent: ${user.email}`))
+            .catch(err => console.error(`[AUTH] Welcome email failed: ${user.email} - ${err.message}`));
 
         const jwtToken = generateJWT(user._id);
         const refreshToken = generateRefreshToken(user._id);
@@ -205,9 +356,9 @@ const verifyMagicLink = async (req, res) => {
             maxAge: 90 * 24 * 60 * 60 * 1000,
         });
 
-        console.log(`User successfully verified and logged in: ${email}`);
+        console.log(`[AUTH] Magic link verification successful: ${email}`);
 
-        res.json({
+        return res.json({
             success: true,
             message: "Email verified successfully. You are now logged in.",
             data: {
@@ -231,7 +382,7 @@ const verifyMagicLink = async (req, res) => {
             },
         });
     } catch (error) {
-        console.error(`Magic link verification error: ${error.message}`);
+        console.error(`[AUTH] Magic link verification error: ${error.message}`);
         res.status(500).json({
             success: false,
             message: "Error verifying email",
@@ -244,7 +395,7 @@ const googleAuthCallback = async (req, res) => {
         const user = req.user;
 
         if (!user) {
-            console.log("Google OAuth callback failed: No user object");
+            console.log(`[AUTH] Google OAuth failed: No user object`);
             return res.redirect(
                 `${process.env.FRONTEND_URL}/auth/login?error=auth_failed`
             );
@@ -267,10 +418,10 @@ const googleAuthCallback = async (req, res) => {
         callbackUrl.searchParams.append("provider", "google");
         callbackUrl.searchParams.append("success", "true");
 
-        console.log(`Google OAuth successful for user: ${user.email}`);
+        console.log(`[AUTH] Google OAuth successful: ${user.email}`);
         res.redirect(callbackUrl.toString());
     } catch (error) {
-        console.error(`Google OAuth callback error: ${error.message}`);
+        console.error(`[AUTH] Google OAuth error: ${error.message}`);
         res.redirect(`${process.env.FRONTEND_URL}/auth/login?error=callback_error`);
     }
 };
@@ -280,7 +431,7 @@ const githubAuthCallback = async (req, res) => {
         const user = req.user;
 
         if (!user) {
-            console.log("GitHub OAuth callback failed: No user object");
+            console.log(`[AUTH] GitHub OAuth failed: No user object`);
             return res.redirect(
                 `${process.env.FRONTEND_URL}/auth/login?error=auth_failed`
             );
@@ -303,10 +454,10 @@ const githubAuthCallback = async (req, res) => {
         callbackUrl.searchParams.append("provider", "github");
         callbackUrl.searchParams.append("success", "true");
 
-        console.log(`GitHub OAuth successful for user: ${user.email}`);
+        console.log(`[AUTH] GitHub OAuth successful: ${user.email}`);
         res.redirect(callbackUrl.toString());
     } catch (error) {
-        console.error(`GitHub OAuth callback error: ${error.message}`);
+        console.error(`[AUTH] GitHub OAuth error: ${error.message}`);
         res.redirect(`${process.env.FRONTEND_URL}/auth/login?error=callback_error`);
     }
 };
@@ -316,6 +467,7 @@ const refreshTokenController = async (req, res) => {
         const { refreshToken: token } = req.body;
 
         if (!token) {
+            console.log(`[AUTH] Token refresh failed: No token provided`);
             return res.status(401).json({
                 success: false,
                 message: "Refresh token is required",
@@ -326,6 +478,7 @@ const refreshTokenController = async (req, res) => {
         const user = await User.findById(decoded.id);
 
         if (!user) {
+            console.log(`[AUTH] Token refresh failed: User not found`);
             return res.status(404).json({
                 success: false,
                 message: "User not found",
@@ -333,9 +486,7 @@ const refreshTokenController = async (req, res) => {
         }
 
         if (user.status === "suspended" || user.status === "deleted") {
-            console.log(
-                `Refresh token rejected for ${user.status} account: ${user.email}`
-            );
+            console.log(`[AUTH] Token refresh rejected: ${user.status} account - ${user.email}`);
             return res.status(403).json({
                 success: false,
                 message: "Account is not active",
@@ -343,6 +494,8 @@ const refreshTokenController = async (req, res) => {
         }
 
         const newToken = generateJWT(user._id);
+
+        console.log(`[AUTH] Token refreshed successfully: ${user.email}`);
 
         res.json({
             success: true,
@@ -354,14 +507,14 @@ const refreshTokenController = async (req, res) => {
         });
     } catch (error) {
         if (error.name === "TokenExpiredError") {
-            console.log("Refresh token expired");
+            console.log(`[AUTH] Token refresh failed: Token expired`);
             return res.status(401).json({
                 success: false,
                 message: "Refresh token has expired",
             });
         }
 
-        console.error(`Token refresh error: ${error.message}`);
+        console.error(`[AUTH] Token refresh error: ${error.message}`);
         res.status(401).json({
             success: false,
             message: "Invalid refresh token",
@@ -379,6 +532,7 @@ const getCurrentUser = async (req, res) => {
             .populate("primaryWorkspace", "name slug logo");
 
         if (!user) {
+            console.log(`[AUTH] Get current user failed: User not found`);
             return res.status(404).json({
                 success: false,
                 message: "User not found",
@@ -390,7 +544,7 @@ const getCurrentUser = async (req, res) => {
             data: { user },
         });
     } catch (error) {
-        console.error(`Get current user error: ${error.message}`);
+        console.error(`[AUTH] Get current user error: ${error.message}`);
         res.status(500).json({
             success: false,
             message: "Error fetching user profile",
@@ -429,7 +583,7 @@ const updateProfile = async (req, res) => {
             runValidators: true,
         }).select("-password -magicLinkToken -magicLinkExpires");
 
-        console.log(`Profile updated for user: ${user.email}`);
+        console.log(`[AUTH] Profile updated: ${user.email}`);
 
         res.json({
             success: true,
@@ -437,7 +591,7 @@ const updateProfile = async (req, res) => {
             data: { user },
         });
     } catch (error) {
-        console.error(`Profile update error: ${error.message}`);
+        console.error(`[AUTH] Profile update error: ${error.message}`);
         res.status(500).json({
             success: false,
             message: "Error updating profile",
@@ -450,6 +604,7 @@ const updateAvatar = async (req, res) => {
         const { avatar } = req.body;
 
         if (!avatar) {
+            console.log(`[AUTH] Avatar update failed: No avatar URL provided`);
             return res.status(400).json({
                 success: false,
                 message: "Avatar URL is required",
@@ -462,7 +617,7 @@ const updateAvatar = async (req, res) => {
             { new: true, runValidators: true }
         ).select("-password");
 
-        console.log(`Avatar updated for user: ${user.email}`);
+        console.log(`[AUTH] Avatar updated: ${user.email}`);
 
         res.json({
             success: true,
@@ -470,7 +625,7 @@ const updateAvatar = async (req, res) => {
             data: { user },
         });
     } catch (error) {
-        console.error(`Avatar update error: ${error.message}`);
+        console.error(`[AUTH] Avatar update error: ${error.message}`);
         res.status(500).json({
             success: false,
             message: "Error updating avatar",
@@ -483,6 +638,7 @@ const register = async (req, res) => {
         const { name, email, password, confirmPassword } = req.body;
 
         if (!name || !email || !password || !confirmPassword) {
+            console.log(`[AUTH] Registration failed: Missing required fields`);
             return res.status(400).json({
                 success: false,
                 message: "Please provide all required fields",
@@ -490,6 +646,7 @@ const register = async (req, res) => {
         }
 
         if (password !== confirmPassword) {
+            console.log(`[AUTH] Registration failed: Passwords do not match`);
             return res.status(400).json({
                 success: false,
                 message: "Passwords do not match",
@@ -497,6 +654,7 @@ const register = async (req, res) => {
         }
 
         if (password.length < 8) {
+            console.log(`[AUTH] Registration failed: Password too short`);
             return res.status(400).json({
                 success: false,
                 message: "Password must be at least 8 characters",
@@ -505,6 +663,7 @@ const register = async (req, res) => {
 
         const existingUser = await User.findOne({ email: email.toLowerCase() });
         if (existingUser) {
+            console.log(`[AUTH] Registration failed: Email already exists - ${email}`);
             return res.status(400).json({
                 success: false,
                 message: "Email already registered",
@@ -543,16 +702,11 @@ const register = async (req, res) => {
         await user.save();
 
         try {
-            const verificationLink = `${process.env.FRONTEND_URL
-                }/auth/verify-email?token=${verificationToken}&email=${encodeURIComponent(
-                    email
-                )}`;
+            const verificationLink = `${process.env.FRONTEND_URL}/auth/verify-email?token=${verificationToken}&email=${encodeURIComponent(email)}`;
             await sendVerificationEmail(email, verificationLink, name);
-            console.log(`Verification email sent to: ${email}`);
+            console.log(`[AUTH] Verification email sent: ${email}`);
         } catch (emailError) {
-            console.error(
-                `Failed to send verification email to ${email}: ${emailError.message}`
-            );
+            console.error(`[AUTH] Verification email failed: ${email} - ${emailError.message}`);
         }
 
         const token = generateJWT(user._id);
@@ -565,7 +719,7 @@ const register = async (req, res) => {
             maxAge: 90 * 24 * 60 * 60 * 1000,
         });
 
-        console.log(`New user registered: ${email}`);
+        console.log(`[AUTH] User registered successfully: ${email}`);
 
         res.status(201).json({
             success: true,
@@ -584,7 +738,7 @@ const register = async (req, res) => {
             },
         });
     } catch (error) {
-        console.error(`Registration error: ${error.message}`);
+        console.error(`[AUTH] Registration error: ${error.message}`);
         res.status(500).json({
             success: false,
             message: "Error during registration",
@@ -597,6 +751,7 @@ const login = async (req, res) => {
         const { email, password } = req.body;
 
         if (!email || !password) {
+            console.log(`[AUTH] Login failed: Missing credentials`);
             return res.status(400).json({
                 success: false,
                 message: "Email and password are required",
@@ -606,7 +761,7 @@ const login = async (req, res) => {
         const user = await User.findOne({ email: email.toLowerCase() });
 
         if (!user) {
-            console.log(`Login attempt with non-existent email: ${email}`);
+            console.log(`[AUTH] Login failed: User not found - ${email}`);
             return res.status(401).json({
                 success: false,
                 message: "Invalid credentials",
@@ -614,7 +769,7 @@ const login = async (req, res) => {
         }
 
         if (!user.password) {
-            console.log(`Password login attempt for OAuth account: ${email}`);
+            console.log(`[AUTH] Login failed: OAuth account - ${email}`);
             return res.status(401).json({
                 success: false,
                 message: "Please use OAuth login for your account",
@@ -622,7 +777,7 @@ const login = async (req, res) => {
         }
 
         if (user.status === "suspended") {
-            console.log(`Login attempt for suspended account: ${email}`);
+            console.log(`[AUTH] Login failed: Suspended account - ${email}`);
             return res.status(403).json({
                 success: false,
                 message: "Your account has been suspended",
@@ -630,7 +785,7 @@ const login = async (req, res) => {
         }
 
         if (user.status === "deleted") {
-            console.log(`Login attempt for deleted account: ${email}`);
+            console.log(`[AUTH] Login failed: Deleted account - ${email}`);
             return res.status(403).json({
                 success: false,
                 message: "Your account has been deleted",
@@ -640,7 +795,7 @@ const login = async (req, res) => {
         const isMatch = await user.comparePassword(password);
 
         if (!isMatch) {
-            console.log(`Failed login attempt for: ${email}`);
+            console.log(`[AUTH] Login failed: Incorrect password - ${email}`);
             return res.status(401).json({
                 success: false,
                 message: "Invalid credentials",
@@ -661,7 +816,7 @@ const login = async (req, res) => {
             maxAge: 90 * 24 * 60 * 60 * 1000,
         });
 
-        console.log(`User logged in successfully: ${email}`);
+        console.log(`[AUTH] Login successful: ${email}`);
 
         res.json({
             success: true,
@@ -683,7 +838,7 @@ const login = async (req, res) => {
             },
         });
     } catch (error) {
-        console.error(`Login error: ${error.message}`);
+        console.error(`[AUTH] Login error: ${error.message}`);
         res.status(500).json({
             success: false,
             message: "Error during login",
@@ -698,14 +853,14 @@ const logout = async (req, res) => {
         res.clearCookie("token");
         res.clearCookie("refreshToken");
 
-        console.log(`User logged out: ${req.user.email}`);
+        console.log(`[AUTH] User logged out: ${req.user.email}`);
 
         res.json({
             success: true,
             message: "Logged out successfully",
         });
     } catch (error) {
-        console.error(`Logout error: ${error.message}`);
+        console.error(`[AUTH] Logout error: ${error.message}`);
         res.status(500).json({
             success: false,
             message: "Error during logout",
@@ -718,6 +873,7 @@ const changePassword = async (req, res) => {
         const { currentPassword, newPassword, confirmPassword } = req.body;
 
         if (!currentPassword || !newPassword || !confirmPassword) {
+            console.log(`[AUTH] Password change failed: Missing fields`);
             return res.status(400).json({
                 success: false,
                 message: "All fields are required",
@@ -725,6 +881,7 @@ const changePassword = async (req, res) => {
         }
 
         if (newPassword !== confirmPassword) {
+            console.log(`[AUTH] Password change failed: Passwords do not match`);
             return res.status(400).json({
                 success: false,
                 message: "Passwords do not match",
@@ -732,6 +889,7 @@ const changePassword = async (req, res) => {
         }
 
         if (newPassword.length < 8) {
+            console.log(`[AUTH] Password change failed: Password too short`);
             return res.status(400).json({
                 success: false,
                 message: "Password must be at least 8 characters",
@@ -741,6 +899,7 @@ const changePassword = async (req, res) => {
         const user = await User.findById(req.user._id);
 
         if (!user.password) {
+            console.log(`[AUTH] Password change failed: OAuth account - ${user.email}`);
             return res.status(400).json({
                 success: false,
                 message: "You cannot change password for OAuth accounts",
@@ -750,7 +909,7 @@ const changePassword = async (req, res) => {
         const isMatch = await user.comparePassword(currentPassword);
 
         if (!isMatch) {
-            console.log(`Failed password change attempt for: ${user.email}`);
+            console.log(`[AUTH] Password change failed: Incorrect current password - ${user.email}`);
             return res.status(401).json({
                 success: false,
                 message: "Current password is incorrect",
@@ -762,14 +921,14 @@ const changePassword = async (req, res) => {
 
         await user.save();
 
-        console.log(`Password changed successfully for user: ${user.email}`);
+        console.log(`[AUTH] Password changed successfully: ${user.email}`);
 
         res.json({
             success: true,
             message: "Password changed successfully",
         });
     } catch (error) {
-        console.error(`Password change error: ${error.message}`);
+        console.error(`[AUTH] Password change error: ${error.message}`);
         res.status(500).json({
             success: false,
             message: "Error changing password",
@@ -782,6 +941,7 @@ const forgotPassword = async (req, res) => {
         const { email } = req.body;
 
         if (!email) {
+            console.log(`[AUTH] Forgot password failed: Email missing`);
             return res.status(400).json({
                 success: false,
                 message: "Email is required",
@@ -791,6 +951,7 @@ const forgotPassword = async (req, res) => {
         const user = await User.findOne({ email: email.toLowerCase() });
 
         if (!user) {
+            console.log(`[AUTH] Forgot password failed: User not found - ${email}`);
             return res.status(404).json({
                 success: false,
                 message: "User not found",
@@ -798,6 +959,7 @@ const forgotPassword = async (req, res) => {
         }
 
         if (!user.password) {
+            console.log(`[AUTH] Forgot password failed: OAuth account - ${email}`);
             return res.status(400).json({
                 success: false,
                 message: "Password reset not available for OAuth accounts",
@@ -815,7 +977,10 @@ const forgotPassword = async (req, res) => {
 
         try {
             const resetLink = `${process.env.FRONTEND_URL}/auth/reset-password?token=${resetToken}`;
-            console.log(`Password reset link generated for: ${email}`);
+
+            await sendPasswordResetEmail(email, resetLink, user.name);
+
+            console.log(`[AUTH] Password reset link sent: ${email}`);
 
             res.json({
                 success: true,
@@ -826,9 +991,7 @@ const forgotPassword = async (req, res) => {
             user.passwordResetExpires = null;
             await user.save();
 
-            console.error(
-                `Failed to send reset email to ${email}: ${emailError.message}`
-            );
+            console.error(`[AUTH] Password reset email failed: ${email} - ${emailError.message}`);
 
             res.status(500).json({
                 success: false,
@@ -836,7 +999,7 @@ const forgotPassword = async (req, res) => {
             });
         }
     } catch (error) {
-        console.error(`Forgot password error: ${error.message}`);
+        console.error(`[AUTH] Forgot password error: ${error.message}`);
         res.status(500).json({
             success: false,
             message: "Error processing forgot password",
@@ -849,6 +1012,7 @@ const resetPassword = async (req, res) => {
         const { token, password, confirmPassword } = req.body;
 
         if (!token || !password || !confirmPassword) {
+            console.log(`[AUTH] Reset password failed: Missing fields`);
             return res.status(400).json({
                 success: false,
                 message: "Token and passwords are required",
@@ -856,6 +1020,7 @@ const resetPassword = async (req, res) => {
         }
 
         if (password !== confirmPassword) {
+            console.log(`[AUTH] Reset password failed: Passwords do not match`);
             return res.status(400).json({
                 success: false,
                 message: "Passwords do not match",
@@ -863,6 +1028,7 @@ const resetPassword = async (req, res) => {
         }
 
         if (password.length < 8) {
+            console.log(`[AUTH] Reset password failed: Password too short`);
             return res.status(400).json({
                 success: false,
                 message: "Password must be at least 8 characters",
@@ -877,7 +1043,7 @@ const resetPassword = async (req, res) => {
         });
 
         if (!user) {
-            console.log("Invalid or expired password reset token attempt");
+            console.log(`[AUTH] Reset password failed: Invalid or expired token`);
             return res.status(400).json({
                 success: false,
                 message: "Invalid or expired reset token",
@@ -891,14 +1057,14 @@ const resetPassword = async (req, res) => {
 
         await user.save();
 
-        console.log(`Password reset successful for user: ${user.email}`);
+        console.log(`[AUTH] Password reset successful: ${user.email}`);
 
         res.json({
             success: true,
             message: "Password reset successful. Please login with new password.",
         });
     } catch (error) {
-        console.error(`Reset password error: ${error.message}`);
+        console.error(`[AUTH] Reset password error: ${error.message}`);
         res.status(500).json({
             success: false,
             message: "Error resetting password",
@@ -931,6 +1097,8 @@ const getAllUsers = async (req, res) => {
 
         const total = await User.countDocuments(query);
 
+        console.log(`[AUTH] Users fetched: ${users.length} of ${total}`);
+
         res.json({
             success: true,
             data: {
@@ -941,7 +1109,7 @@ const getAllUsers = async (req, res) => {
             },
         });
     } catch (error) {
-        console.error(`Get all users error: ${error.message}`);
+        console.error(`[AUTH] Get all users error: ${error.message}`);
         res.status(500).json({
             success: false,
             message: "Error fetching users",
@@ -957,6 +1125,7 @@ const getUserById = async (req, res) => {
             .populate("primaryWorkspace", "name slug logo");
 
         if (!user) {
+            console.log(`[AUTH] Get user by ID failed: User not found - ${req.params.id}`);
             return res.status(404).json({
                 success: false,
                 message: "User not found",
@@ -968,7 +1137,7 @@ const getUserById = async (req, res) => {
             data: { user },
         });
     } catch (error) {
-        console.error(`Get user by ID error: ${error.message}`);
+        console.error(`[AUTH] Get user by ID error: ${error.message}`);
         res.status(500).json({
             success: false,
             message: "Error fetching user",
@@ -991,14 +1160,14 @@ const deleteAccount = async (req, res) => {
         res.clearCookie("token");
         res.clearCookie("refreshToken");
 
-        console.log(`Account deleted for user: ${req.user.email}`);
+        console.log(`[AUTH] Account deleted: ${req.user.email}`);
 
         res.json({
             success: true,
             message: "Account deleted successfully",
         });
     } catch (error) {
-        console.error(`Account deletion error: ${error.message}`);
+        console.error(`[AUTH] Account deletion error: ${error.message}`);
         res.status(500).json({
             success: false,
             message: "Error deleting account",
@@ -1007,6 +1176,7 @@ const deleteAccount = async (req, res) => {
 };
 
 module.exports = {
+    verifyEmail,
     sendMagicLink,
     verifyMagicLink,
     googleAuthCallback,

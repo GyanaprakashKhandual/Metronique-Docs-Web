@@ -2,7 +2,7 @@ const mongoose = require('mongoose');
 
 const roleSchema = new mongoose.Schema({
     name: {
-        type: String,
+        type: String,sparse: true,
         required: true
     },
     permissions: {
@@ -114,7 +114,8 @@ const invitationSchema = new mongoose.Schema({
     token: {
         type: String,
         required: true,
-        unique: true
+        unique: true,
+        sparse: true
     },
     status: {
         type: String,
@@ -471,11 +472,24 @@ workspaceSchema.pre('save', function (next) {
             .replace(/^-+|-+$/g, '');
     }
 
+    // Calculate active members
     this.statistics.activeMembers = this.members.filter(m => m.status === 'active').length;
 
-    if (this.usage.members) {
-        this.usage.members.count = this.members.filter(m => m.status === 'active').length;
+    // Initialize usage.members if it doesn't exist
+    if (!this.usage) {
+        this.usage = {};
     }
+    
+    if (!this.usage.members) {
+        this.usage.members = {
+            count: 0,
+            limit: null,
+            unlimited: false
+        };
+    }
+
+    // Update member count
+    this.usage.members.count = this.members.filter(m => m.status === 'active').length;
 
     next();
 });

@@ -39,6 +39,7 @@ app.use(cors({
         if (!origin || allowedOrigins.includes(origin)) {
             callback(null, true);
         } else {
+            console.log(`[SERVER] CORS blocked origin: ${origin}`);
             callback(new Error('Not allowed by CORS'));
         }
     },
@@ -56,7 +57,15 @@ app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 app.use(cookieParser());
 
-app.use(mongoSanitize());
+app.use((req, res, next) => {
+    try {
+        if (req.body) req.body = mongoSanitize.sanitize(req.body);
+        if (req.params) req.params = mongoSanitize.sanitize(req.params);
+    } catch (err) {
+        console.error(`[SERVER] Mongo sanitization error: ${err.message}`);
+    }
+    next();
+});
 
 if (env.isDevelopment()) {
     app.use(morgan('dev'));
@@ -109,8 +118,7 @@ app.get('/health', async (req, res) => {
     });
 });
 
-
-const API_VERSION = env.api.version;
+const API_VERSION = process.env.API_VERSION;
 
 app.get('/api', (req, res) => {
     res.status(200).json({
@@ -124,6 +132,7 @@ app.get('/api', (req, res) => {
 app.use(`/api/${API_VERSION}/users`, userRoutes);
 
 app.use((req, res) => {
+    console.log(`[SERVER] 404 - Route not found: ${req.method} ${req.originalUrl}`);
     res.status(404).json({
         success: false,
         message: 'Route not found',
@@ -132,7 +141,7 @@ app.use((req, res) => {
 });
 
 app.use((err, req, res, next) => {
-    console.error('Error:', err);
+    console.error(`[SERVER] Error on ${req.method} ${req.originalUrl}: ${err.message}`);
 
     if (err.name === 'ValidationError') {
         return res.status(400).json({
@@ -150,10 +159,12 @@ app.use((err, req, res, next) => {
     }
 
     if (err.code === 11000) {
+        const field = Object.keys(err.keyPattern)[0];
+        console.log(`[SERVER] Duplicate entry detected: ${field}`);
         return res.status(409).json({
             success: false,
             message: 'Duplicate entry found',
-            field: Object.keys(err.keyPattern)[0]
+            field
         });
     }
 
@@ -166,45 +177,50 @@ app.use((err, req, res, next) => {
 
 const startServer = async () => {
     try {
+        console.log('[SERVER] Starting server initialization...');
+
         await connectDB();
+        console.log('[SERVER] Database connected successfully');
 
         const PORT = env.node.port;
         const HOST = env.node.host;
 
         server.listen(PORT, () => {
             console.log('');
-            console.log('='.repeat(50));
-            console.log(`Server running in ${env.node.env.toUpperCase()} mode`);
-            console.log(`Server: http://${HOST}:${PORT}`);
-            console.log(`Health: http://${HOST}:${PORT}/health`);
-            console.log(`API: http://${HOST}:${PORT}/api`);
-            console.log('='.repeat(50));
+            console.log('='.repeat(60));
+            console.log(`[SERVER] Environment: ${env.node.env.toUpperCase()}`);
+            console.log(`[SERVER] Server URL: http://${HOST}:${PORT}`);
+            console.log(`[SERVER] Health Check: http://${HOST}:${PORT}/health`);
+            console.log(`[SERVER] API Endpoint: http://${HOST}:${PORT}/api`);
+            console.log(`[SERVER] API Version: ${API_VERSION}`);
+            console.log('='.repeat(60));
             console.log('');
         });
     } catch (error) {
-        console.error('Failed to start server:', error.message);
+        console.error(`[SERVER] Failed to start: ${error.message}`);
         process.exit(1);
     }
 };
 
 const gracefulShutdown = async (signal) => {
-    console.log(`\n${signal} received. Starting graceful shutdown...`);
+    console.log(`\n[SERVER] ${signal} received - initiating graceful shutdown...`);
 
     server.close(async () => {
-        console.log('HTTP server closed');
+        console.log('[SERVER] HTTP server closed');
 
         try {
             await require('./configs/db.config').disconnectDB();
-            console.log('Database connections closed');
+            console.log('[SERVER] Database connections closed');
+            console.log('[SERVER] Shutdown completed successfully');
             process.exit(0);
         } catch (error) {
-            console.error('Error during shutdown:', error);
+            console.error(`[SERVER] Error during shutdown: ${error.message}`);
             process.exit(1);
         }
     });
 
     setTimeout(() => {
-        console.error('Forced shutdown after timeout');
+        console.error('[SERVER] Forced shutdown - timeout exceeded');
         process.exit(1);
     }, 10000);
 };
@@ -213,14 +229,14 @@ process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
 process.on('unhandledRejection', (reason, promise) => {
-    console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+    console.error('[SERVER] Unhandled Promise Rejection:', reason);
     if (env.isProduction()) {
         gracefulShutdown('UNHANDLED_REJECTION');
     }
 });
 
 process.on('uncaughtException', (error) => {
-    console.error('Uncaught Exception:', error);
+    console.error('[SERVER] Uncaught Exception:', error.message);
     gracefulShutdown('UNCAUGHT_EXCEPTION');
 });
 
