@@ -1,15 +1,38 @@
 {
-  "name": "web",
+  "name": "metronique-docs-backend",
   "version": "1.0.0",
-  "description": "",
+  "description": "metronique is providing the best word editor on web integrating with anthropic",
   "main": "index.js",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
-  },
-  "keywords": [],
-  "author": "",
+  "author": "Gyana prakash Khandual",
   "license": "ISC",
+  "homepage": "https://github.com/GyanaprakashKhandual/Metronique-Docs-Web#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/GyanaprakashKhandual/Metronique-Docs-Web.git"
+  },
+  "bugs": {
+    "url": "https://github.com/GyanaprakashKhandual/Metronique-Docs-Web/issues"
+  },
   "type": "commonjs",
+  "engines": {
+    "node": ">=18.0.0",
+    "npm": ">=9.0.0"
+  },
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js",
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix"
+  },
+  "keywords": [
+    "metronique-docs",
+    "collaboration",
+    "real-time",
+    "document",
+    "editor",
+    "file-upload"
+  ],
   "dependencies": {
     "bcryptjs": "^3.0.3",
     "compression": "^1.8.1",
@@ -29,7 +52,10 @@
     "passport-github2": "^0.1.12",
     "passport-google-oauth20": "^2.0.0",
     "passport-jwt": "^4.0.1",
-    "passport-local": "^1.0.0"
+    "passport-local": "^1.0.0",
+    "multer": "^1.4.5-lts.1",
+    "uuid": "^9.0.1",
+    "sharp": "^0.33.1"
   },
   "devDependencies": {
     "nodemon": "^3.1.10"

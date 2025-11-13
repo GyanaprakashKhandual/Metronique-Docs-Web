@@ -10,16 +10,26 @@ const rateLimit = require('express-rate-limit');
 const morgan = require('morgan');
 const path = require('path');
 const http = require('http');
+const fs = require('fs');
 
 const env = require('./configs/environment.config');
 const connectDB = require('./configs/db.config');
 require('./configs/passport.config');
 
 const userRoutes = require('./routes/user.route');
+const fileUploadRoutes = require('./routes/file.upload.route');
 
 env.validateEnvironment();
 
 const app = express();
+app.use(express.json());
+
+const uploadDir = process.env.UPLOAD_FOLDER || './uploads';
+if (!fs.existsSync(uploadDir)) {
+    fs.mkdirSync(uploadDir, { recursive: true });
+}
+
+app.use(express.static('uploads'));
 const server = http.createServer(app);
 
 app.use(helmet({
@@ -130,6 +140,7 @@ app.get('/api', (req, res) => {
 });
 
 app.use(`/api/${API_VERSION}/users`, userRoutes);
+app.use(`/api/${API_VERSION}/files`, fileUploadRoutes);
 
 app.use((req, res) => {
     console.log(`[SERVER] 404 - Route not found: ${req.method} ${req.originalUrl}`);
